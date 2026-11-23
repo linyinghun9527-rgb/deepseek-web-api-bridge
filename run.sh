@@ -6,7 +6,10 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-export PLAYWRIGHT_BROWSERS_PATH="$HOME/Library/Application Support/cn.org.hermesagent.desktop/runtime/hermes-home/cache/ms-playwright"
+PW_CACHE="$HOME/Library/Application Support/cn.org.hermesagent.desktop/runtime/hermes-home/cache/ms-playwright"
+if [ -d "$PW_CACHE" ]; then
+  export PLAYWRIGHT_BROWSERS_PATH="$PW_CACHE"
+fi
 export PYTHONUNBUFFERED=1
 
 PY=".venv/bin/python"

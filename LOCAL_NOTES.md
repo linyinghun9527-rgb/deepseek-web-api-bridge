@@ -140,6 +140,34 @@ Model    : deepseek-web
   （`No data found for resource with given identifier`），
   这也是只能抓 DOM 的原因。
 
+## 部署拓扑（Mac mini 常驻）
+
+```
+              ┌─────────────────────────────┐
+              │  Mac mini M4 (192.168.1.29) │
+              │  launchd 常驻 + KeepAlive   │
+              │  Bridge :8000 (0.0.0.0)     │
+              └──────────┬──────────────────┘
+                         │ 局域网
+        ┌────────────────┴────────────────┐
+   MacBook Air                       mini 本机 Hermes
+   (192.168.1.6)                     provider dsweb
+   provider dsweb                     → 127.0.0.1:8000
+   → 192.168.1.29:8000
+```
+
+- mini 路径：`~/deepseek-web-api-bridge`（`.venv` 用 uv + Python 3.12，Chromium 在 `~/Library/Caches/ms-playwright`）
+- 开机自启：`~/Library/LaunchAgents/com.linshijie.deepseek-bridge.plist`
+  - 管理：`launchctl print gui/$(id -u)/com.linshijie.deepseek-bridge`
+  - 停止：`launchctl bootout gui/$(id -u)/com.linshijie.deepseek-bridge`
+  - 重启后自动拉起，crash 也会被 KeepAlive 拉回（实测 kill -9 后自动换新 pid）
+- ⚠️ **同一个 DeepSeek 账号只能有一个桥在跑**。既然 mini 常驻，MacBook 上那份要停掉
+  （`./run.sh stop`），否则两个桥抢同一账号，会出现 502 / 超时 / 答案错乱。
+- mini 上 Hermes 的 provider `dsweb` 指向 `127.0.0.1:8000/v1`；SSH 里跑 CLI 必须
+  `export HERMES_HOME=...hermes-home`，否则 `hermes config set` 会写进 `~/.hermes` 而非桌面版配置。
+
+跨机实测：MacBook → mini 问答 4.96s；Hermes 走 mini 13s；带 tools 返回 `tool_calls`（`{"city":"上海"}`）5.1s。
+
 ## 接入 Hermes（已完成）
 
 Hermes 侧新增自定义 provider `dsweb`（配置在 `$HERMES_HOME/config.yaml` 的 `providers:` 下）：
