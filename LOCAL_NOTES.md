@@ -117,7 +117,7 @@ Model    : deepseek-web
    curl / 客户端超时断开时，服务端任务继续占用 worker，
    下一个请求要排队等它跑完（实测拖到 130s+、甚至 1000s+）。
    → 排查时务必让请求跑完；生产环境把客户端超时设置得比
-   `WORKER_HARD_TIMEOUT_MS`(150s) 更大。
+   `WORKER_HARD_TIMEOUT_MS`(已调为 240s) 更大。
 
 ### 运行纪律
 
