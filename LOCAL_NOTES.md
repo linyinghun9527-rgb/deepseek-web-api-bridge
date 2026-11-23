@@ -140,6 +140,39 @@ Model    : deepseek-web
   （`No data found for resource with given identifier`），
   这也是只能抓 DOM 的原因。
 
+## 登录态失效与重新登录
+
+DeepSeek 会把会话踢掉（实测：同一账号在两个浏览器/两台机器上跑之后，token 直接被判失效，
+页面跳 `chat.deepseek.com/sign_in`，桥会空转到超时）。
+
+**怎么判断是登录失效**：`/api/workers/status` 里 `finalUrl` 出现 `/sign_in`，
+且 `consecutiveFailures` 持续增长。
+
+**重新登录流程（在 MacBook 上做，因为需要可见窗口）**：
+
+```bash
+cd ~/deepseek-web-api-bridge
+.venv/bin/python scripts/capture_login.py --account-id ds-main --display-name "主账号" --no-import
+# 弹窗里扫码/手机号+验证码登录 → 脚本抓到真实 token 后输出 data/logins/deepseek-state-*.json
+```
+
+然后把状态导到 mini（mini 的 worker 必须先停，导入后再启动）：
+
+```bash
+# 停 worker
+curl -X POST http://192.168.1.29:8000/api/accounts/ds-main/worker/stop -H "Authorization: Bearer <key>"
+# 导入（用同一个 state JSON POST /api/accounts/import）
+# 再启动 worker
+curl -X POST http://192.168.1.29:8000/api/accounts/ds-main/worker/start -H "Authorization: Bearer <key>"
+```
+
+⚠️ 两个坑（都已修）：
+
+1. `capture_login.py` 原来的判定会把「游客首页 + 输入框」误判成已登录，抓到空 token（长度 30）。
+   现在必须 `userToken` 解析后长度 ≥40 且 URL 不在 `/sign_in` 才算数。
+2. **必须在导入之后重启 worker**。worker 启动时把 state 读进内存，先启后导会导致它一直用旧状态
+   显示 `sign_in`（看着像登录态没用，其实只是没重新加载）。
+
 ## 部署拓扑（Mac mini 常驻）
 
 ```

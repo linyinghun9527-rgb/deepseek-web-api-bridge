@@ -44,11 +44,15 @@ def read_env(key: str, default: str = "") -> str:
 
 LOGIN_PROBE = """
 () => {
-  const out = {token: false, composer: false, url: location.href, title: document.title};
+  const out = {token: false, tokenLen: 0, composer: false, url: location.href, title: document.title};
   try {
     const raw = localStorage.getItem('userToken');
     if (raw) {
-      try { out.token = !!(JSON.parse(raw) || {}).value; } catch (e) { out.token = raw.length > 20; }
+      let v = raw;
+      try { const j = JSON.parse(raw); v = (j && (j.value ?? j.token ?? '')) || ''; } catch (e) {}
+      out.tokenLen = String(v).length;
+      // 真登录态的 token 很长；空壳是 {"value":"","__version":"0"}
+      out.token = String(v).length >= 40;
     }
   } catch (e) {}
   try {
@@ -114,7 +118,7 @@ async def run(args) -> int:
                 probe = await page.evaluate(LOGIN_PROBE)
             except Exception:
                 probe = None
-            if probe and (probe.get("token") or (probe.get("composer") and "sign_in" not in probe.get("url", ""))):
+            if probe and probe.get("token") and "sign_in" not in probe.get("url", ""):
                 break
             if time.time() - last_note > 15:
                 print(f"     仍在等待… 当前 {probe.get('url') if probe else '页面切换中'}")

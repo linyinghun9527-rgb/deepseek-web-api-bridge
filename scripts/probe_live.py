@@ -96,7 +96,7 @@ async def main():
 
 
 if __name__ == "__main__":
-    os.environ.setdefault("PLAYWRIGHT_BROWSERS_PATH",
-                          str(pathlib.Path.home() / "Library/Application Support/cn.org.hermesagent.desktop"
-                              / "runtime/hermes-home/cache/ms-playwright"))
+    _pw = pathlib.Path.home() / "Library/Application Support/cn.org.hermesagent.desktop/runtime/hermes-home/cache/ms-playwright"
+    if _pw.is_dir():
+        os.environ.setdefault("PLAYWRIGHT_BROWSERS_PATH", str(_pw))
     asyncio.run(main())
