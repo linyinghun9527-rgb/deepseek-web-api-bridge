@@ -91,6 +91,11 @@ def main():
     st, body, el = call("/api/health")
     print(f"  {st} {body[:120]}")
 
+    print("== 重置 worker（清掉遗留卡死状态）==")
+    reset_worker()
+    st, body, el = call("/api/workers/status")
+    print(f"  {body[:200]}")
+
     print("== 基础：3 个不同 session 各一句 ==")
     run("s-A 首发", "只回答两个字：收到", "st-a")
     run("s-B 首发", "只回答两个字：明白", "st-b")

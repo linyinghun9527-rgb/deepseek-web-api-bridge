@@ -31,6 +31,9 @@ class DeepSeekWorker:
         self._session_urls: dict[str, str] = {}
         self._session_pages: dict[str, Page] = {}
         self._active_session_id: str | None = None
+        # 修复(本地): 卡死任务的“代”标记。force_recover 会自增 epoch，
+        # 旧任务恢复时若 epoch 不匹配就不再改动 _busy，避免踩到新任务的并发状态。
+        self._epoch = 0
 
     def reserve(self) -> bool:
         if self._busy or self._reserved:
@@ -104,6 +107,33 @@ class DeepSeekWorker:
             await self._close_unlocked()
             return await self.status()
 
+    async def force_recover(self, state: DeepSeekState) -> WorkerStatusResponse:
+        """看门狗强制恢复（本地新增）。
+
+        故意**不获取** _lock：卡死的任务可能长期占着它。
+        直接关闭浏览器 → 让挂起中的 Playwright 调用抛 TargetClosedError，
+        再重建锁、清空会话页、重新启动。
+        """
+        self._epoch += 1
+        try:
+            await self._close_unlocked()
+        except Exception:
+            pass
+        self._busy = False
+        self._reserved = False
+        self._session_pages.clear()
+        self._session_urls.clear()
+        self._active_session_id = None
+        self._lock = asyncio.Lock()
+        self._restart_count += 1
+        self._last_recovered_at = now_iso()
+        self._last_error = "watchdog: worker 卡死超过硬超时，已强制重建浏览器"
+        try:
+            await self._start_unlocked(state)
+        except Exception as exc:
+            self._last_error = f"watchdog 重建失败: {type(exc).__name__}: {exc}"
+        return await self.status()
+
     async def reset_conversation(self, state: DeepSeekState) -> WorkerStatusResponse:
         async with self._lock:
             await self._start_unlocked(state)
@@ -161,8 +191,13 @@ class DeepSeekWorker:
 
     async def _prepare_page_for_session(self, state: DeepSeekState, session_id: str | None, *, force_new: bool = False) -> Page:
         """
-        V12: use an independent Playwright Page per logical sessionId.
-        This prevents Telegram/Web/OpenClaw sessions from sharing one DeepSeek chat.
+        修复(本地): 同一个账号上下文只使用一个页面。
+
+        上游 V12 为每个 sessionId 新建一个 page 做隔离，但实测 DeepSeek 这个 SPA
+        在多标签页场景下只有部分标签能正常渲染（第 2 个 page 的 body 文本几乎是空的），
+        导致 composer 点不到、回复永远提取不到，任务卡死。
+        由于 worker 本身用 _lock 串行化提问，单页面足够；
+        会话隔离改为在同一页面内切换到各自的 DeepSeek 会话（_switch_session）。
         """
         if not self._context:
             await self._start_unlocked(state)
@@ -170,46 +205,64 @@ class DeepSeekWorker:
         if not self._context:
             raise RuntimeError("浏览器上下文不存在。")
 
-        if not session_id:
-            if not self._page or self._page.is_closed():
-                self._page = await self._context.new_page()
-                self._page.set_default_timeout(settings.browser_timeout_ms)
-                await self._page.goto(DEEPSEEK_URL, wait_until="domcontentloaded", timeout=settings.browser_timeout_ms)
-                await self._page.wait_for_timeout(1500)
-            if force_new:
-                await self._try_new_conversation(self._page)
-                await self._page.wait_for_timeout(1200)
-            return self._page
-
-        key = str(session_id).strip() or "default"
-        page = self._session_pages.get(key)
-        if page and page.is_closed():
-            self._session_pages.pop(key, None)
-            page = None
-
-        if page is None:
+        page = self._page
+        if not page or page.is_closed():
             page = await self._context.new_page()
             page.set_default_timeout(settings.browser_timeout_ms)
-            known_url = self._session_urls.get(key)
             try:
-                await page.goto(known_url or DEEPSEEK_URL, wait_until="domcontentloaded", timeout=settings.browser_timeout_ms)
-            except Exception:
                 await page.goto(DEEPSEEK_URL, wait_until="domcontentloaded", timeout=settings.browser_timeout_ms)
-            await page.wait_for_timeout(1800)
+            except Exception:
+                pass
+            self._page = page
+            await page.wait_for_timeout(1500)
 
-            if force_new or not known_url:
+        await self._ensure_rendered(page)
+
+        if not session_id:
+            if force_new:
                 await self._try_new_conversation(page)
-                await page.wait_for_timeout(700)
+                await page.wait_for_timeout(1200)
+                await self._ensure_rendered(page)
+            return page
 
-            self._session_pages[key] = page
+        key = str(session_id).strip() or "default"
+        await self._switch_session(page, state, key, force_new=force_new)
+        await self._ensure_rendered(page)
 
-        elif force_new:
-            await self._try_new_conversation(page)
-            await page.wait_for_timeout(700)
-
+        self._session_pages[key] = page
         self._page = page
         self._active_session_id = key
         return page
+
+    async def _ensure_rendered(self, page: Page, retries: int = 2) -> None:
+        """修复(本地): SPA 偶发只渲染空壳（body 文本极短），此时输入框点不动、提取为空。
+        检测到空壳就重新加载一次。"""
+        for attempt in range(retries + 1):
+            try:
+                info = await asyncio.wait_for(
+                    page.evaluate(
+                        """() => ({
+                          bodyLen: (document.body && document.body.innerText || '').length,
+                          hasTextarea: !!document.querySelector('textarea'),
+                          url: location.href,
+                        })"""
+                    ),
+                    timeout=15,
+                )
+            except Exception:
+                info = {"bodyLen": 0, "hasTextarea": False}
+            if info.get("bodyLen", 0) >= 100 and info.get("hasTextarea"):
+                return
+            if attempt >= retries:
+                return
+            try:
+                await page.reload(wait_until="domcontentloaded", timeout=settings.browser_timeout_ms)
+            except Exception:
+                try:
+                    await page.goto(DEEPSEEK_URL, wait_until="domcontentloaded", timeout=settings.browser_timeout_ms)
+                except Exception:
+                    pass
+            await page.wait_for_timeout(2500)
 
     def _remember_session_url(self, page: Page, session_id: str | None) -> None:
         if not session_id:
@@ -314,6 +367,7 @@ class DeepSeekWorker:
 
         for attempt in range(recovery_retries + 1):
             async with self._lock:
+                epoch = self._epoch
                 self._busy = True
                 self._reserved = False
                 self._last_ask_at = now_iso()
@@ -370,7 +424,8 @@ class DeepSeekWorker:
                         except Exception:
                             pass
                 finally:
-                    self._busy = False
+                    if epoch == self._epoch:
+                        self._busy = False
 
         elapsed_ms = int((time.monotonic() - started) * 1000)
         return AskResponse(ok=False, answer=None, elapsedMs=elapsed_ms, message=f"发送失败：{last_error}", status=await self.status())
@@ -830,7 +885,7 @@ class DeepSeekWorker:
     async def _is_generating(self, page: Page) -> bool:
         """Best-effort DeepSeek generation detector."""
         try:
-            return bool(await page.evaluate(
+            return bool(await asyncio.wait_for(page.evaluate(
                 """
 () => {
   const nodes = Array.from(document.querySelectorAll("button,[role='button']"));
@@ -855,8 +910,7 @@ class DeepSeekWorker:
   }
   return false;
 }
-"""
-            ))
+""", timeout=10)))
         except Exception:
             return False
 
@@ -867,6 +921,7 @@ class DeepSeekWorker:
 
         before_order = int((before or {}).get("maxOrder", -1)) if isinstance(before, dict) else -1
         before_text = str((before or {}).get("text", "")) if isinstance(before, dict) else str(before or "")
+        before_count = int((before or {}).get("count", 0)) if isinstance(before, dict) else 0
         prompt_text = prompt.strip()
 
         def normalize_piece(text: str) -> str:
@@ -921,7 +976,13 @@ class DeepSeekWorker:
 
         while time.monotonic() < deadline:
             await page.wait_for_timeout(700)
-            candidates = await self._extract_message_candidates(page)
+            try:
+                # 修复(本地): evaluate 本身没有超时，页面挂起会让整个任务永久卡住。
+                candidates = await asyncio.wait_for(
+                    self._extract_message_candidates(page), timeout=20
+                )
+            except asyncio.TimeoutError:
+                raise TimeoutError("提取回复 DOM 超时（页面无响应）。")
             current = aggregate_new_candidates(candidates)
 
             if current and current != before_text and current != prompt_text:

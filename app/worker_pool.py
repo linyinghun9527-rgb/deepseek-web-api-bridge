@@ -14,6 +14,8 @@ class WorkerPool:
         self.workers: dict[str, DeepSeekWorker] = {}
         self._assign_lock = asyncio.Lock()
         self._health_task: asyncio.Task | None = None
+        # 修复(本地): 记录每个 worker 进入 busy 的时刻，用于卡死检测
+        self._busy_since: dict[str, float] = {}
 
     def get_or_create(self, account_id: str) -> DeepSeekWorker:
         if account_id not in self.workers:
@@ -81,6 +83,23 @@ class WorkerPool:
                         continue
                     worker = self.get_or_create(acc.accountId)
                     status = await worker.status()
+
+                    # 修复(本地): 卡死看门狗。ask 若被卡在 Playwright 调用上，
+                    # _lock 和 _busy 会永久不释放，后续请求全部排队。
+                    # 超过硬超时仍未结束就强制重建浏览器。
+                    if status.busy:
+                        t0 = self._busy_since.setdefault(acc.accountId, time.monotonic())
+                        stall_limit = rt.workerHardTimeoutMs / 1000 + 30
+                        if time.monotonic() - t0 > stall_limit:
+                            self._busy_since.pop(acc.accountId, None)
+                            try:
+                                state, _ = self.store.load_state(acc.accountId)
+                                await worker.force_recover(state)
+                            except Exception:
+                                pass
+                        continue
+
+                    self._busy_since.pop(acc.accountId, None)
                     if rt.autoStartWorker and not status.running:
                         try:
                             await self.start_worker(acc.accountId)
