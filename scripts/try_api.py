@@ -33,7 +33,6 @@ def post(path, payload, timeout=180):
         headers={"Content-Type": "application/json", "Authorization": f"Bearer {key}"},
         method="POST",
     )
-    import urllib.error
     t0 = time.time()
     try:
         with urllib.request.urlopen(req, timeout=timeout) as r:

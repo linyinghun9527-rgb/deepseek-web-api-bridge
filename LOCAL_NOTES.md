@@ -139,3 +139,21 @@ Model    : deepseek-web
 - 想读流式 body 用 Playwright 的 `response.text()` 会失败
   （`No data found for resource with given identifier`），
   这也是只能抓 DOM 的原因。
+
+## 本次修复（2026-11-23）
+
+| 问题 | 修复 |
+|---|---|
+| 每个 sessionId 新开一个 page，第 2 个标签页在 headless 下只渲染空壳（body≈42 字符），导致 composer 点不到、任务卡死 | 改为单账号单页面，会话隔离靠切换会话；加空壳检测自动 reload |
+| `page.evaluate` 没有超时，页面挂起会永久占住 `_lock` | 所有 evaluate 包 `asyncio.wait_for` |
+| worker 卡死后 `busy` 永久为 true | `worker_pool` 健康检查加看门狗，超硬超时强制重建浏览器（force_recover） |
+| 上游按 DOM 顺序(order)判断“新回复”，复用会话时拿到上一条甚至用户提问 | 改为只取**最后一个 assistant 节点**，文本稳定 1.5s 且无“生成中”即收尾 |
+| 回车没生效也干等 120s | 发送后校验提问气泡是否出现，未出现立即重发一次 |
+| 卡在哪里看不出来 | `logs/worker-trace.log` 记录 prepared/filled/sent/waiting_reply |
+
+实测（本机 MacBook Air，headless）：
+
+- 连续 5 次请求：**5/5 通过，约 4.8s/次**
+- 连续 10 次请求：9/10（1 次瞬时断连），约 5s/次
+- 多轮上下文（历史走请求体）：通过，约 4.8s
+- 修复前：经常 130s~1000s 超时、502、答案错乱
