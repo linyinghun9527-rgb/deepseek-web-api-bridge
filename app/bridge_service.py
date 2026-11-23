@@ -212,13 +212,18 @@ def messages_to_prompt(messages: list[OpenAIMessage]) -> str:
         )
     elif mode == "compact_history":
         history = _compact_history(messages, turns=max(1, rt.historyWindowTurns))
+        has_assistant = any(m.role == "assistant" for m in messages)
         prompt = ""
         if system_text:
             prompt += f"系统要求：\n{system_text}\n\n"
-        prompt += (
-            "请自然继续下面的对话，只回复用户最新问题，不要总结对话，不要复述记录。\n\n"
-            f"{history}"
-        )
+        if not has_assistant:
+            # 本地修复：单轮请求不要套“请继续对话”，否则模型会回“好的，请继续。”
+            prompt += latest_user
+        else:
+            prompt += (
+                "请自然继续下面的对话，只回复用户最新问题，不要总结对话，不要复述记录。\n\n"
+                f"{history}"
+            )
     else:
         if system_text:
             prompt = f"请遵循以下要求回答用户消息。\n\n系统要求：\n{system_text}\n\n用户消息：\n{latest_user}"
