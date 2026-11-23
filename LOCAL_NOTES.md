@@ -87,6 +87,55 @@ Model    : deepseek-web
 
 修改：`.gitignore` 增加 `.venv/`、`logs/`。
 
-## 已知问题
+## 调试记录（2026-11-23）
 
-见下节「调试记录」。
+### 实测结论
+
+| 场景 | 结果 |
+|---|---|
+| 单轮问答（5 连测） | 5/5 通过，每次约 4.8s |
+| 多轮上下文（请求体带历史） | 通过，暗号能正确回忆 |
+| 同 session 连续 3 次 | 3/3 通过，答案 A/B/C 未串 |
+| 流式 SSE | 通过，6.0s 完整返回 |
+| 同端口跑两个实例 | **必崩**：两个服务抢同一 DeepSeek 账号，出现 502 / 超时 / 答案错乱 |
+
+### 发现的三个真实缺陷（已修）
+
+1. **每个 sessionId 都新开一个浏览器 page**（上游 V12 设计）
+   实测 DeepSeek 这个 SPA 在多标签页下第 2 个 page 常常只渲染空壳
+   （`document.body.innerText` 只有 42 字符，正常 682），
+   导致输入框点不动、回复永远提取不到。
+   → 改为「一个账号一个页面」，会话隔离改用页面内切换 DeepSeek 会话。
+
+2. **Playwright 调用没有超时保护**
+   `page.evaluate` 本身不接受超时，一旦页面卡住，任务永久挂起，
+   `_lock` 和 `_busy` 不释放，后续请求全部排队（表现为「任务仍在运行」）。
+   → 给提取/生成检测加 `asyncio.wait_for`，并新增 `force_recover()` 看门狗：
+   超过 `WORKER_HARD_TIMEOUT_MS + 30s` 仍 busy 就强制重建浏览器。
+
+3. **客户端提前断开后 job 仍在后台跑**
+   curl / 客户端超时断开时，服务端任务继续占用 worker，
+   下一个请求要排队等它跑完（实测拖到 130s+、甚至 1000s+）。
+   → 排查时务必让请求跑完；生产环境把客户端超时设置得比
+   `WORKER_HARD_TIMEOUT_MS`(150s) 更大。
+
+### 运行纪律
+
+- **只允许一个实例**。`./run.sh bg` 已内置端口探测，重复启动会直接拒绝。
+- 调参后要重启：`./run.sh stop && ./run.sh bg`。
+- 查看状态：`./run.sh status`。
+- 大量测试后清历史任务，避免残留 job 干扰：
+  `rm -f data/jobs/*.json`（先停服务）。
+
+### 长文本
+
+2341 字符的 prompt 实测可用（速度会慢于短 prompt，属正常）。
+
+## 技术备注：DeepSeek 网页接口
+
+- 发消息走 `POST /api/v0/chat/completion`，前置 `POST /api/v0/chat/create_pow_challenge`。
+- 响应是流式 SSE，且**带有 PoW 挑战**，无法直接用 HTTP 重放。
+  本项目因此采用 Playwright 驱动真实页面 + DOM 提取，速度受网页渲染影响。
+- 想读流式 body 用 Playwright 的 `response.text()` 会失败
+  （`No data found for resource with given identifier`），
+  这也是只能抓 DOM 的原因。

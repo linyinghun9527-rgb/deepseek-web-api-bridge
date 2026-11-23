@@ -374,6 +374,7 @@ class DeepSeekWorker:
                 try:
                     await self._start_unlocked(state)
                     page = await self._prepare_page_for_session(state, session_id, force_new=new_conversation)
+                    self._trace("prepared", (page.url or "")[:90])
                     if not page or page.is_closed():
                         raise RuntimeError("DeepSeek 页面不存在或已关闭。")
                     if "deepseek.com" not in page.url:
@@ -384,8 +385,19 @@ class DeepSeekWorker:
 
                     before = await self._extract_answer_snapshot(page)
                     await self._fill_prompt(page, prompt)
+                    self._trace("filled")
                     await self._send_prompt(page)
-                    answer = await self._wait_for_answer(page, before, prompt, timeout_ms=timeout_ms)
+                    self._trace("sent")
+                    if not await self._wait_user_echo(page, prompt):
+                        # 发送没生效（常见于刚切新对话、输入框还没就绪）：重试一次
+                        await self._find_composer(page)
+                        await page.wait_for_timeout(800)
+                        await self._fill_prompt(page, prompt)
+                        await self._send_prompt(page)
+                        if not await self._wait_user_echo(page, prompt):
+                            raise RuntimeError("消息未成功发送到 DeepSeek 页面（气泡未出现）。")
+                    self._trace("waiting_reply")
+                    answer = await self._wait_for_answer_v2(page, before, prompt, timeout_ms=timeout_ms)
 
                     if rt.contextAutoResetEnabled and rt.contextFullRetryOnce and await self._answer_indicates_context_full(answer):
                         await self._try_new_conversation(page)
@@ -393,7 +405,7 @@ class DeepSeekWorker:
                         before = await self._extract_answer_snapshot(page)
                         await self._fill_prompt(page, prompt)
                         await self._send_prompt(page)
-                        answer = await self._wait_for_answer(page, before, prompt, timeout_ms=timeout_ms)
+                        answer = await self._wait_for_answer_v2(page, before, prompt, timeout_ms=timeout_ms)
 
                     raw_answer_before_postprocess = answer
                     answer = self._postprocess_answer(answer, answer_format)
@@ -635,12 +647,99 @@ class DeepSeekWorker:
         return str(chosen.get("text") or "").strip()
 
     async def _extract_answer_snapshot(self, page: Page) -> dict:
-        candidates = await self._extract_message_candidates(page)
-        if not candidates:
-            return {"maxOrder": -1, "text": ""}
-        max_order = max(int(c.get("order") or 0) for c in candidates)
-        text = await self._extract_answer_text(page)
-        return {"maxOrder": max_order, "text": text}
+        text = await self._extract_last_assistant_text(page)
+        return {"maxOrder": 0, "text": text}
+
+    def _trace(self, stage: str, extra: str = "") -> None:
+        """本地新增：把 ask 的关键阶段写进 logs/worker-trace.log，用于定位卡点。"""
+        try:
+            import pathlib as _p
+            log = _p.Path("logs"); log.mkdir(parents=True, exist_ok=True)
+            with open(log / "worker-trace.log", "a", encoding="utf-8") as fh:
+                fh.write(f"{now_iso()} [{self.account_id}] {stage} {extra}\n")
+        except Exception:
+            pass
+
+    async def _wait_user_echo(self, page: Page, prompt: str, timeout_ms: int = 8000) -> bool:
+        """本地新增：确认提问真的发到了页面上（气泡出现），避免“回车无效”后干等 120s。"""
+        tail = prompt.strip()[-30:]
+        if not tail:
+            return True
+        deadline = time.monotonic() + timeout_ms / 1000
+        while time.monotonic() < deadline:
+            try:
+                hit = await asyncio.wait_for(
+                    page.evaluate(
+                        "(t) => (document.body && document.body.innerText || '').includes(t)",
+                        tail,
+                    ),
+                    timeout=10,
+                )
+            except Exception:
+                hit = False
+            if hit:
+                return True
+            await page.wait_for_timeout(500)
+        return False
+
+    async def _extract_last_assistant_text(self, page: Page) -> str:
+        """本地新增：直接取最后一个可见的 assistant 内容节点文本。
+
+        上游用 DOM 顺序(order)差值判断“新回复”，在复用会话/切换会话时会误判，
+        出现拿到上一条回复甚至用户提问的情况。这里改为只看最后一个 assistant 节点。
+        """
+        try:
+            return await asyncio.wait_for(
+                page.evaluate(
+                    """() => {
+  const pick = (sel) => Array.from(document.querySelectorAll(sel)).filter((n) => {
+    const r = n.getBoundingClientRect();
+    const st = getComputedStyle(n);
+    if (!(r.width > 0 && r.height > 0)) return false;
+    if (st.display === 'none' || st.visibility === 'hidden') return false;
+    // 排除用户气泡里的节点
+    const bubble = n.closest("[class*='fbb737a4'], [class*='user']");
+    return !bubble;
+  });
+  let nodes = pick('.ds-markdown.ds-assistant-message-main-content');
+  if (!nodes.length) nodes = pick('.ds-markdown');
+  if (!nodes.length) nodes = pick("[class*='ds-markdown']");
+  if (!nodes.length) return '';
+  const last = nodes[nodes.length - 1];
+  return (last.innerText || last.textContent || '').trim();
+}"""
+                ),
+                timeout=15,
+            )
+        except Exception:
+            return ""
+
+    async def _wait_for_answer_v2(self, page: Page, before: dict, prompt: str, *, timeout_ms: int) -> str:
+        """本地新增：基于“最后一个 assistant 节点 + 文本稳定”的收尾判定。"""
+        deadline = time.monotonic() + timeout_ms / 1000
+        baseline = str((before or {}).get("text", "")).strip()
+        prompt_text = prompt.strip()
+        last_text = ""
+        stable_since = time.monotonic()
+
+        while time.monotonic() < deadline:
+            await page.wait_for_timeout(600)
+            current = (await self._extract_last_assistant_text(page)).strip()
+            if not current or current == baseline or current == prompt_text:
+                continue
+            if current != last_text:
+                last_text = current
+                stable_since = time.monotonic()
+                continue
+            if time.monotonic() - stable_since >= 1.5:
+                if not await self._is_generating(page):
+                    return current
+                if time.monotonic() - stable_since >= 8.0:
+                    return current
+
+        if last_text:
+            return last_text
+        raise TimeoutError("等待回复超时。")
 
     async def dom_debug(self, state: DeepSeekState | None = None) -> dict:
         if state is not None:

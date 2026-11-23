@@ -15,11 +15,21 @@ PY=".venv/bin/python"
 PORT="$(grep -E '^PORT=' .env 2>/dev/null | cut -d= -f2)"
 PORT="${PORT:-8000}"
 
+is_up() { curl -s -o /dev/null -m 2 "http://127.0.0.1:${PORT}/api/health"; }
+
 case "${1:-fg}" in
   fg)
+    if is_up; then echo "端口 ${PORT} 已被占用，已有一个实例在跑（不要开第二个，会抢同一个 DeepSeek 账号）"; exit 1; fi
     exec "$PY" -m uvicorn app.main:app --host 0.0.0.0 --port "$PORT"
     ;;
+  status)
+    if is_up; then echo "运行中: $(curl -s -m 3 http://127.0.0.1:${PORT}/api/health)"; else echo "未运行"; fi
+    ;;
   bg)
+    if is_up; then
+      echo "已在运行（端口 ${PORT} 有响应），不重复启动。要重启请先 ./run.sh stop"
+      exit 1
+    fi
     mkdir -p logs
     nohup "$PY" -m uvicorn app.main:app --host 0.0.0.0 --port "$PORT" >> logs/bridge.log 2>&1 &
     echo $! > logs/bridge.pid
