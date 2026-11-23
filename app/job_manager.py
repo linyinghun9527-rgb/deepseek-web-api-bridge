@@ -118,7 +118,12 @@ class JobManager:
         while True:
             try:
                 job_id = await self.queue.get()
-                asyncio.create_task(self._process_job(job_id))
+                # 修复(本地): 底层只有一个浏览器 worker，串行处理更可预测；
+                # 原实现 create_task 并发跑，会让多个任务抢同一 worker 造成排队/卡死。
+                try:
+                    await self._process_job(job_id)
+                except Exception:
+                    pass
             except asyncio.CancelledError:
                 break
             except Exception:
