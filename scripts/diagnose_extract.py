@@ -1,7 +1,11 @@
 #!/usr/bin/env python3
 """
-回复抓取诊断：直接用 DeepSeekWorker 的内部逻辑，但把 _wait_for_answer 换成
-带日志版本，逐轮打印候选节点，定位“回复已出现却检测不到”的问题。
+回复抓取诊断（历史脚本，仅供对照）
+
+⚠️ 注意：本脚本内部重写了**上游旧版** `_wait_for_answer`（按 DOM order 判断新回复），
+它不反映 `app/deepseek_worker.py` 现在使用的 `_wait_for_answer_v2`（取最后一个 assistant 节点）。
+它跑出来「等待回复超时 / 候选=0」是修复前的现象记录，不代表当前代码状态。
+当前稳定性请跑：`scripts/stab5.py` / `scripts/test_multiturn.py`。
 
 用法: .venv/bin/python scripts/diagnose_extract.py
 """
