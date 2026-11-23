@@ -196,6 +196,9 @@ curl -X POST http://192.168.1.29:8000/api/accounts/ds-main/worker/start -H "Auth
   - 重启后自动拉起，crash 也会被 KeepAlive 拉回（实测 kill -9 后自动换新 pid）
 - ⚠️ **同一个 DeepSeek 账号只能有一个桥在跑**。既然 mini 常驻，MacBook 上那份要停掉
   （`./run.sh stop`），否则两个桥抢同一账号，会出现 502 / 超时 / 答案错乱。
+  - 已加**硬保护**：MacBook 的 `.env` 里配 `PRIMARY_URL=http://192.168.1.29:8000`，
+    `./run.sh fg|bg` 会先探主节点，在线就拒绝启动并提示。
+  - 确需在本机临时启动：`FORCE=1 ./run.sh bg`（会抢账号，用完记得停）。
 - mini 上 Hermes 的 provider `dsweb` 指向 `127.0.0.1:8000/v1`；SSH 里跑 CLI 必须
   `export HERMES_HOME=...hermes-home`，否则 `hermes config set` 会写进 `~/.hermes` 而非桌面版配置。
 
