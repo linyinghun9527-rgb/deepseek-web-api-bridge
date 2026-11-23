@@ -155,7 +155,7 @@ providers:
     api_key: "${BRIDGE_DSWEB_KEY}"   # 值放在 $HERMES_HOME/.env
     models:
       deepseek-web:
-        supports_tools: false          # 桥不支持工具调用，只能纯对话
+        supports_tools: true           # 实测可用：能返回标准 tool_calls
 ```
 
 用法：
@@ -171,6 +171,21 @@ Bridge trace 有 prepared/filled/sent/waiting_reply 完整链路。
 
 注意：`hermes chat -m <alias>` **不会**解析用户自定义别名（会静默回落默认 provider），
 必须用 `--provider dsweb`。
+
+### 工具调用（实测可用）
+
+| 测试 | 结果 |
+|---|---|
+| 直接打 `/v1/chat/completions` 带 `tools` | `finish_reason=tool_calls`，返回 `{"name":"get_weather","arguments":"{\"city\":\"北京\"}"}`，4.9s |
+| Hermes 走 dsweb 派任务 | 真实执行 2 次 `ls`/`find` 命令，16s（`fast_final` 模式） |
+| 同上，`agentToolResultMode=model` | 19s，最后自然回答「当前目录下共有 10 个文件。」 |
+
+`agentToolResultMode` 两种行为：
+
+- `fast_final`：直接把工具结果原文返回，省一次往返、最快，但回答是裸 JSON。
+- `model`（**当前采用**）：把工具结果回灌给模型再总结一句，多一次往返（约 +3~10s），体验正常。
+
+改法：`curl -X PUT /api/settings`（或改 `data/settings/runtime.json`）。
 
 ## 本次修复（2026-11-23）
 
