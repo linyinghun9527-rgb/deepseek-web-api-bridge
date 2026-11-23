@@ -140,6 +140,38 @@ Model    : deepseek-web
   （`No data found for resource with given identifier`），
   这也是只能抓 DOM 的原因。
 
+## 接入 Hermes（已完成）
+
+Hermes 侧新增自定义 provider `dsweb`（配置在 `$HERMES_HOME/config.yaml` 的 `providers:` 下）：
+
+```yaml
+providers:
+  dsweb:
+    name: DeepSeek Web (local bridge)
+    base_url: http://127.0.0.1:8000/v1
+    api_mode: chat_completions
+    transport: openai_chat
+    model: deepseek-web
+    api_key: "${BRIDGE_DSWEB_KEY}"   # 值放在 $HERMES_HOME/.env
+    models:
+      deepseek-web:
+        supports_tools: false          # 桥不支持工具调用，只能纯对话
+```
+
+用法：
+
+```bash
+# CLI
+hermes chat --provider dsweb -m deepseek-web
+# 桌面端：Cmd+K / 模型选择里选 provider dsweb
+```
+
+实测：Hermes 走该 provider 提问，13s 返回「接入成功」，session 记录的模型为 `deepseek-web`，
+Bridge trace 有 prepared/filled/sent/waiting_reply 完整链路。
+
+注意：`hermes chat -m <alias>` **不会**解析用户自定义别名（会静默回落默认 provider），
+必须用 `--provider dsweb`。
+
 ## 本次修复（2026-11-23）
 
 | 问题 | 修复 |
